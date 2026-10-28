@@ -236,7 +236,13 @@ test("Namecheap-only setups can't buy, with a pointer to Porkbun", async () => {
   delete process.env.PORKBUN_API_KEY;
   delete process.env.PORKBUN_SECRET_API_KEY;
   withNamecheap();
-  await assert.rejects(main(["buy", "new.dev", "-y"]), /goes through Porkbun.*dom login porkbun/);
+  await assert.rejects(main(["buy", "new.dev", "-y"]), /your own Porkbun account.*dom login porkbun/);
+});
+
+test("transfer without Porkbun outside a terminal explains how to connect", async () => {
+  delete process.env.PORKBUN_API_KEY;
+  delete process.env.PORKBUN_SECRET_API_KEY;
+  await assert.rejects(main(["transfer", "moving.com"]), /Transferring goes through your own Porkbun account/);
 });
 
 // ---------- transfers ----------

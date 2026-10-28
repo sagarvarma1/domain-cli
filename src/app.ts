@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { detectPublicIp, findOwner, openAccounts, REGISTRARS, type Accounts } from "./accounts.js";
 import { configPath, DEFAULT_TLDS, loadConfig, loadSavedConfig, saveConfig, type Config } from "./config.js";
+import { porkbunBrowserLogin, porkbunSandboxLogin, type Keys } from "./login.js";
+import { publicAvailability } from "./lookup.js";
 import { Namecheap } from "./namecheap.js";
 import { Cancelled, confirmOrAbort, explainNotPossible, ok, printJson, printQuote, UsageError, warn, withSpinner } from "./output.js";
 import { Porkbun } from "./porkbun.js";
@@ -20,7 +22,7 @@ ${c.bold("Usage")}
   dom <command> [args] [flags]
 
 ${c.bold("Accounts")}
-  login [porkbun|namecheap]      Connect a registrar account
+  login [porkbun|namecheap]      Connect a registrar account (Porkbun: approve in your browser)
   logout [porkbun|namecheap]     Forget saved keys (all, if none named)
   accounts                       Show connected accounts
   balance                        Account credit everywhere
@@ -63,13 +65,15 @@ ${c.bold("Flags")}
       --prio N         dns: priority for MX/SRV
       --no-privacy     buy: register without WHOIS privacy
       --auth-code C    transfer: the EPP code (otherwise asked for, hidden)
-      --sandbox        login namecheap: use Namecheap's sandbox
+      --sandbox        login: instant Porkbun test account with fake money
+                       (with namecheap: use Namecheap's sandbox)
+      --manual         login porkbun: paste keys instead of approving in the browser
       --mock           Use Porkbun's mock API (no keys, canned data)
   -h, --help           Show this help
   -v, --version        Show version
 
 ${c.bold("Examples")}
-  dom search coolname
+  dom search coolname            ${c.dim("# works without an account")}
   dom buy coolname.dev
   dom dns coolname.dev add A @ 76.76.21.21
   dom transfer mysite.com
@@ -96,6 +100,7 @@ type Flags = {
   resume?: boolean;
   "no-dns-copy"?: boolean;
   sandbox?: boolean;
+  manual?: boolean;
 };
 
 function parse(argv: string[]) {
@@ -123,6 +128,7 @@ function parse(argv: string[]) {
       resume: { type: "boolean" },
       "no-dns-copy": { type: "boolean" },
       sandbox: { type: "boolean" },
+      manual: { type: "boolean" },
     },
   });
   return { flags: values as Flags, args: positionals };
@@ -194,11 +200,19 @@ function requireAny(accounts: Accounts): void {
   }
 }
 
-function requirePorkbun(accounts: Accounts, what: string): Porkbun {
-  if (!accounts.porkbun) {
-    throw new UsageError(`${what} goes through Porkbun. Connect it with \`dom login porkbun\` (keys: https://porkbun.com/account/api).`);
-  }
-  return accounts.porkbun;
+/**
+ * Buying and transfers go through the user's own Porkbun account. If it isn't connected yet,
+ * offer to connect it right here (one browser approval) instead of failing.
+ */
+async function ensurePorkbun(accounts: Accounts, flags: Flags, what: string): Promise<Accounts> {
+  if (accounts.porkbun) return accounts;
+  const hint = `${what} goes through your own Porkbun account. Connect it with \`dom login porkbun\`.`;
+  if (!isInteractive() || flags.json || flags.yes) throw new UsageError(hint);
+  console.log(`${what} goes through your own Porkbun account (you own the domains and pay Porkbun directly).`);
+  await confirmOrAbort(false, "Connect one now? It opens your browser, and new users can sign up there.");
+  await loginPorkbun(await loadSavedConfig(), flags);
+  console.log();
+  return openAccounts(await loadConfig(), { onWarning: warn });
 }
 
 /** The account that holds `domain`: --registrar if given, else whichever connected account has it. */
@@ -228,25 +242,37 @@ async function cmdLogin(flags: Flags, args: string[]) {
     );
   }
   let which = registrarName(args[0]);
+  if (!which && (flags.sandbox || flags.manual)) which = "porkbun";
   if (!which) {
     const answer = await ask(`Which registrar? ${c.dim("(porkbun / namecheap)")} `);
     which = registrarName(answer || "porkbun")!;
   }
   const saved = await loadSavedConfig();
-  if (which === "porkbun") return loginPorkbun(saved);
+  if (which === "porkbun") return loginPorkbun(saved, flags);
   return loginNamecheap(saved, flags);
 }
 
-async function loginPorkbun(saved: Config) {
-  console.log(`Create an API key at ${c.cyan("https://porkbun.com/account/api")}`);
-  console.log(c.dim("Tip: a sandbox key (pk1_sb_…) lets you try everything with fake money.\n"));
-  const apiKey = await ask("API key (pk1_…): ");
-  const secretKey = await ask("Secret key (sk1_…): ", { hidden: true });
-  if (!apiKey || !secretKey) throw new UsageError("Both keys are required.");
+async function loginPorkbun(saved: Config, flags: Flags) {
+  let keys: Keys;
+  if (flags.sandbox) {
+    keys = await withSpinner("Creating a sandbox account", () => porkbunSandboxLogin());
+  } else if (flags.manual) {
+    console.log(`Create an API key at ${c.cyan("https://porkbun.com/account/api")}\n`);
+    keys = { apiKey: await ask("API key (pk1_…): "), secretKey: await ask("Secret key (sk1_…): ", { hidden: true }) };
+    if (!keys.apiKey || !keys.secretKey) throw new UsageError("Both keys are required.");
+  } else {
+    keys = await porkbunBrowserLogin({
+      onWaiting: (url) => {
+        console.log("Opening Porkbun in your browser. Sign in (or create an account) and click Approve.");
+        console.log(c.dim(`If it didn't open, go to: ${url}`));
+      },
+    });
+  }
+  const { apiKey, secretKey } = keys;
 
   const account = await withSpinner("Checking keys", () => new Porkbun({ apiKey, secretKey, onWarning: warn }).verify());
   const path = await saveConfig({ ...saved, accounts: { ...saved.accounts, porkbun: { apiKey, secretKey } } });
-  ok(`Connected Porkbun as ${c.bold(account.account)}${account.sandbox ? c.yellow(" (sandbox)") : ""}`);
+  ok(`Connected Porkbun as ${c.bold(account.account)}${account.sandbox ? c.yellow(" (sandbox: fake money, nothing real is bought)") : ""}`);
   console.log(c.dim(`Keys saved to ${path} (readable only by you)`));
   if (!account.scopes.includes("full") && !account.scopes.includes("purchase")) {
     warn("This key can't make purchases. Give it the `purchase` permission to use buy, renew and transfer.");
@@ -325,26 +351,46 @@ function statusCell(a: Availability): string {
   if (a.available === null) return c.yellow("unknown");
   if (!a.available) return c.dim(a.note === "already yours" ? "yours" : "taken");
   if (a.premium) return c.yellow("premium");
+  if (a.likely) return c.green("likely free");
   return c.green("available");
+}
+
+/** No account: registry lookups for availability, Porkbun's public price list for prices. */
+async function publicSearch(candidates: string[], config: Config): Promise<Availability[]> {
+  const tlds = [...new Set(candidates.map((d) => d.slice(d.indexOf(".") + 1)))];
+  const pb = config.accounts.porkbun;
+  const [results, prices] = await Promise.all([
+    publicAvailability(candidates),
+    new Porkbun({ apiKey: pb?.apiKey ?? "", secretKey: pb?.secretKey ?? "" }).pricing(tlds).catch(() => []),
+  ]);
+  const byTld = new Map(prices.map((p) => [p.tld, p]));
+  return results.map((a) => {
+    const price = byTld.get(a.domain.slice(a.domain.indexOf(".") + 1));
+    return a.available && price ? { ...a, priceCents: price.registrationCents, renewalCents: price.renewalCents } : a;
+  });
 }
 
 async function cmdSearch(accounts: Accounts, config: Config, flags: Flags, args: string[]) {
   if (!args.length) throw new UsageError("Usage: dom search <name|domain>...");
-  requireAny(accounts);
-  // Porkbun's check includes prices; Namecheap's only says yes/no.
-  const r = accounts.porkbun ?? accounts.all[0]!;
   const tlds = flags.tlds ? splitList(flags.tlds) : config.tlds?.length ? config.tlds : DEFAULT_TLDS;
   const candidates = expandCandidates(args, tlds);
-  const results = await withSpinner(`Checking ${candidates.length} domain${candidates.length === 1 ? "" : "s"}`, () => r.check(candidates));
+  const label = `Checking ${candidates.length} domain${candidates.length === 1 ? "" : "s"}`;
+  // With Porkbun connected, its check is exact (premium names, promos). Otherwise ask the registries.
+  const results = accounts.porkbun
+    ? await withSpinner(label, () => accounts.porkbun!.check(candidates))
+    : await withSpinner(label, () => publicSearch(candidates, config));
   if (flags.json) return printJson(results);
 
   const rows = results.map((a) => [
     a.available ? c.bold(a.domain) : a.domain,
     statusCell(a),
     a.available ? money(a.priceCents) + (a.promo ? c.cyan(" promo") : "") : "",
-    a.available && a.renewalCents !== undefined ? c.dim(`renews ${money(a.renewalCents)}`) : c.dim(a.note ?? ""),
+    a.available && a.renewalCents !== undefined && !a.likely ? c.dim(`renews ${money(a.renewalCents)}`) : c.dim(a.note ?? ""),
   ]);
   console.log(table(rows, ["DOMAIN", "STATUS", "1ST YEAR", ""]));
+  if (!accounts.porkbun && results.some((a) => a.available)) {
+    console.log(c.dim("\nPrices are Porkbun's standard rates; premium names may cost more. `dom buy` gives the exact price."));
+  }
 
   const buyable = results.filter((a) => a.available && !a.premium);
   if (buyable.length) console.log(c.dim(`\nBuy one with: dom buy ${buyable[0]!.domain}`));
@@ -371,7 +417,7 @@ async function cmdPrice(config: Config, flags: Flags, args: string[]) {
 
 async function cmdBuy(accounts: Accounts, flags: Flags, args: string[]) {
   const domain = requireDomain(args[0], "dom buy <domain>");
-  const r = requirePorkbun(accounts, "Buying");
+  const r = (await ensurePorkbun(accounts, flags, "Buying")).porkbun!;
 
   const [check] = await withSpinner(`Checking ${domain}`, () => r.check([domain]));
   if (!check || check.available === null) throw new RegistrarError(`The registry didn't answer for ${domain}. Try again.`);
@@ -513,6 +559,7 @@ async function cmdNs(accounts: Accounts, flags: Flags, args: string[]) {
 
   const ns = await withSpinner("Fetching nameservers", () => r.getNameservers(domain));
   if (flags.json) return printJson({ domain, registrar: r.name, ns });
+  if (!ns.length) return console.log(`No nameservers set for ${domain} at ${r.label}.`);
   for (const n of ns) console.log(n);
 }
 
@@ -651,10 +698,12 @@ export async function main(argv: string[], opts: { fetch?: typeof fetch } = {}):
       return cmdNs(accounts(), flags, rest);
     case "dns":
       return cmdDns(accounts(), flags, rest);
-    case "transfer":
-      return cmdTransfer(accounts(), flags, requireDomain(rest[0], "dom transfer <domain> [--auth-code CODE]"));
+    case "transfer": {
+      const domain = requireDomain(rest[0], "dom transfer <domain> [--auth-code CODE]");
+      return cmdTransfer(await ensurePorkbun(accounts(), flags, "Transferring"), flags, domain);
+    }
     case "transfers":
-      return cmdTransfers(accounts(), flags);
+      return cmdTransfers(await ensurePorkbun(accounts(), flags, "Transferring"), flags);
     case "config":
       return cmdConfig(flags, rest);
     default:

@@ -53,7 +53,8 @@ export class Porkbun implements Registrar {
     this.sandbox = opts.apiKey.startsWith("pk1_sb_");
   }
 
-  private async post(path: string, body: Json = {}, headers: Record<string, string> = {}): Promise<Json> {
+  /** `accept` lists non-SUCCESS statuses that are answers rather than errors (e.g. PENDING while polling). */
+  private async post(path: string, body: Json = {}, headers: Record<string, string> = {}, accept: string[] = []): Promise<Json> {
     let res: Response;
     try {
       res = await this.fetchImpl(`${this.baseUrl}${path}`, {
@@ -75,7 +76,7 @@ export class Porkbun implements Registrar {
 
     for (const w of (data.warnings as string[] | undefined) ?? []) this.opts.onWarning?.(w);
 
-    if (data.status !== "SUCCESS") {
+    if (data.status !== "SUCCESS" && !accept.includes(data.status)) {
       let message = String(data.message ?? `Request failed (HTTP ${res.status})`);
       if (res.status === 429) {
         const wait = res.headers.get("retry-after") ?? data.ttlRemaining;
@@ -84,6 +85,38 @@ export class Porkbun implements Registrar {
       throw new RegistrarError(message, data.code, res.status);
     }
     return data;
+  }
+
+  // ---- getting keys without copy-paste (these work on a keyless client) ----
+
+  /**
+   * Start a browser approval. The account holder opens `authUrl`, signs in (or signs up) and approves;
+   * `retrieveApiKey` then hands back both keys once to whoever holds the PKCE verifier.
+   */
+  async requestApiKey(opts: { name: string; codeChallenge: string; scopes?: string[] }) {
+    const data = await this.post("/apikey/request", {
+      name: opts.name,
+      codeChallenge: opts.codeChallenge,
+      codeChallengeMethod: "S256",
+      ...(opts.scopes ? { scopes: opts.scopes } : {}),
+    });
+    return { requestToken: String(data.requestToken), authUrl: String(data.authUrl), expires: String(data.expiration ?? "") };
+  }
+
+  /** undefined while the account holder hasn't approved yet. */
+  async retrieveApiKey(requestToken: string, codeVerifier: string): Promise<{ apiKey: string; secretKey: string } | undefined> {
+    const data = await this.post("/apikey/retrieve", { requestToken, codeVerifier }, {}, ["PENDING"]);
+    if (data.status === "PENDING") return undefined;
+    if (!data.apikey || !data.secretapikey) {
+      throw new RegistrarError("Porkbun approved the key but didn't return the secret. Run `dom login porkbun` again.", data.code);
+    }
+    return { apiKey: String(data.apikey), secretKey: String(data.secretapikey) };
+  }
+
+  /** A throwaway sandbox account with fake credit, no signup. */
+  async requestSandboxKey(name: string): Promise<{ apiKey: string; secretKey: string }> {
+    const data = await this.post("/apikey/request", { name, sandbox: true });
+    return { apiKey: String(data.apikey), secretKey: String(data.secretapikey) };
   }
 
   async verify(): Promise<Account> {

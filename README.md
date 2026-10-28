@@ -48,15 +48,28 @@ npm link         # puts `dom` on your PATH (undo: npm unlink -g dom-cli)
 
 Requires Node 20+. No runtime dependencies.
 
+## Quick start
+
+```sh
+dom search coolname          # no account needed
+dom login --sandbox          # instant test account with $1,000 of fake money
+dom buy coolname.dev         # try the whole flow; nothing real is bought
+dom login porkbun            # when you're ready: approve dom in your browser
+```
+
+**Searching needs no account.** Without one, `dom` asks each domain's registry directly over RDAP (the official public lookup that replaced WHOIS), and shows Porkbun's public prices. A few registries (.io, .co, .sh, .me) have no public lookup. For those, `dom` checks DNS and shows **likely free**, and `dom buy` confirms the exact availability and price.
+
+**Buying needs your own Porkbun account.** You own your domains and pay Porkbun directly; `dom` never sits in between. Run `dom buy` without an account and dom offers to connect one on the spot.
+
 ## Connect your accounts
 
 ### Porkbun (buying, transfers, management)
 
-1. Create an API key at <https://porkbun.com/account/api>. Give it the **purchase** permission if you want `buy`, `renew` and `transfer`.
-   **Try a sandbox key first** (`pk1_sb_…`). It has fake credit and simulates everything, so nothing is real or charged.
-2. `dom login porkbun`
-3. Purchases are paid from your **Porkbun account credit**, not your card. Add credit at <https://porkbun.com/account/credit>. Porkbun limits API spending to $100/month unless you change it.
-4. Each domain needs **API access** turned on in Porkbun's dashboard. `dom list` flags any that don't have it.
+1. `dom login porkbun` opens Porkbun in your browser. Sign in, or create an account, and click **Approve**. `dom` receives its key automatically, so there's nothing to copy or paste. It asks only for the permissions it uses: read, purchase, domains and DNS.
+   - `dom login --sandbox` makes a throwaway test account with fake credit, for trying things out.
+   - `dom login porkbun --manual` lets you paste keys from <https://porkbun.com/account/api> instead.
+2. Purchases are paid from your **Porkbun account credit**, not your card. Add credit at <https://porkbun.com/account/credit>. Porkbun limits API spending to $100/month unless you change it.
+3. Each domain needs **API access** turned on in Porkbun's dashboard. `dom list` flags any that don't have it.
 
 ### Namecheap (manage what you already have there)
 
@@ -135,6 +148,8 @@ src/cli.ts         entry point
 src/app.ts         argument parsing and commands
 src/transfer.ts    `dom transfer`: no-downtime move to Porkbun
 src/accounts.ts    connected accounts, finding which one holds a domain
+src/login.ts       browser approval login (PKCE) and sandbox accounts
+src/lookup.ts      account-free availability via RDAP, with DNS fallback
 src/registrar.ts   provider-neutral interface + types
 src/porkbun.ts     Porkbun API v3 client (JSON)
 src/namecheap.ts   Namecheap API client (XML)

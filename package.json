@@ -1,6 +1,6 @@
 {
   "name": "dom-cli",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Buy, transfer and manage domains from your terminal \u2014 Porkbun, Namecheap, and more",
   "keywords": [
     "domains",

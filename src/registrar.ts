@@ -11,6 +11,8 @@ export interface Availability {
   priceCents?: number;
   renewalCents?: number;
   promo: boolean;
+  /** Available per a DNS check only (no registry lookup for this TLD); the registrar has the final word. */
+  likely?: boolean;
   note?: string;
 }
 
